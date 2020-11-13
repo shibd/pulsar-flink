@@ -88,7 +88,7 @@ public abstract class PulsarTestBase extends TestLogger {
             }
         }
         zkUrl = pulsarService.getZkUrl();
-        Thread.sleep(80 * 1000L);
+        Thread.sleep(80 * 100L);
 
         log.info("-------------------------------------------------------------------------");
         log.info("Successfully started pulsar service at cluster " + spec.clusterName());
