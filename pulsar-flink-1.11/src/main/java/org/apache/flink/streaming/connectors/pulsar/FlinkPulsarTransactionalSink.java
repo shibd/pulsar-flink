@@ -56,6 +56,7 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -139,7 +140,7 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
      */
     protected final SerializableObject pendingRecordsLock = new SerializableObject();
 
-    //TODO make this changable
+    //TODO make this changeable
     protected long maxBlockTimeMs = 100000;
 
     /**
@@ -156,6 +157,8 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
 
     protected List<MessageId> pendingMessages;
 
+    protected ConcurrentHashMap<TxnID, List<MessageId>> tid2MessagesMap;
+
     protected transient List<CompletableFuture<MessageId>> pendingFutures;
 
     protected final int tranactionTimeout;
@@ -169,6 +172,8 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
 
     //protected transient PulsarAdmin admin;
 
+    protected transient Schema<IN> schema;
+
     public FlinkPulsarTransactionalSink(
             String adminUrl,
             Map<String, Object> producerConf,
@@ -178,11 +183,13 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
             TopicKeyExtractor<IN> topicKeyExtractor,
             Class<IN> recordClazz,
             RecordSchemaType recordSchemaType,
+            Schema<IN> schema,
             Semantic semantic,
             int tranactionTimeout
     ) {
         super(new TransactionStateSerializer(), VoidSerializer.INSTANCE);
         // TODO set the transaction timeout
+        this.schema = schema;
         this.adminUrl = adminUrl;
         this.tranactionTimeout = tranactionTimeout;
         this.producerConf = producerConf;
@@ -192,6 +199,7 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
         this.schemaType = recordSchemaType;
         this.semantic = checkNotNull(semantic, "semantic is null");
         this.pendingMessages = new LinkedList<>();
+        this.tid2MessagesMap = new ConcurrentHashMap<>();
         if (defaultTopicName.isPresent()) {
             this.forcedTopic = true;
             this.defaultTopic = defaultTopicName.get();
@@ -238,9 +246,9 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
     private void acknowledgeMessage() {
         if (flushOnCheckpoint) {
                 pendingRecords.decrementAndGet();
-                if (pendingRecords.get() == 0) {
+                /*if (pendingRecords.get() == 0) {
                     pendingRecordsLock.notifyAll();
-                }
+                }*/
         }
     }
 
@@ -254,8 +262,17 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
                 if (failedWrite == null && throwable == null) {
                     acknowledgeMessage();
                     //PulsarTransactionState<IN> currentTransaction = currentTransaction();
-                    //TxnID transactionalId = currentTransaction.transactionalId;
-                    pendingMessages.add(messageId);
+                    TxnID transactionalId = currentTransaction().transactionalId;
+                    List<MessageId> messageIdList;
+                    if(tid2MessagesMap.get(transactionalId) == null){
+                        messageIdList = new ArrayList<>();
+                        tid2MessagesMap.put(transactionalId, messageIdList);
+                    }else{
+                        messageIdList = tid2MessagesMap.get(transactionalId);
+                    }
+                    System.out.println("callback thread:" + Thread.currentThread().getName() + "tid:" + transactionalId);
+                    if(!messageIdList.contains(messageId)) messageIdList.add(messageId);
+                    //pendingMessages.add(messageId);
                 } else if (failedWrite == null && throwable != null) {
                     failedWrite = throwable;
                 } else { // failedWrite != null
@@ -267,7 +284,16 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
                 if (failedWrite == null && throwable != null) {
                     log.error("Error while sending message to Pulsar: {}", ExceptionUtils.stringifyException(throwable));
                 }
-                pendingMessages.add(messageId);
+                TxnID transactionalId = currentTransaction().transactionalId;
+                List<MessageId> messageIdList;
+                if(tid2MessagesMap.get(transactionalId) == null){
+                    messageIdList = new ArrayList<>();
+                    tid2MessagesMap.put(transactionalId, messageIdList);
+                }else{
+                    messageIdList = tid2MessagesMap.get(transactionalId);
+                }
+                messageIdList.add(messageId);
+                //pendingMessages.add(messageId);
                 acknowledgeMessage();
             };
         }
@@ -287,6 +313,9 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
 
 
     private Schema<IN> buildSchema(Class<IN> recordClazz, RecordSchemaType recordSchemaType) {
+        if(recordClazz == Integer.class){
+            return (Schema<IN>) Schema.INT32;
+        }
         if (recordSchemaType == null) {
             return Schema.AVRO(recordClazz);
         }
@@ -333,7 +362,7 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
 
     @Override
     public void snapshotState(FunctionSnapshotContext context) throws Exception {
-        log.info("snapshotState with pending message size {}", pendingMessages.size());
+        log.info("snapshotState with pending message size {}", tid2MessagesMap.get(currentTransaction().transactionalId).size());
         super.snapshotState(context);
     }
 
@@ -414,7 +443,7 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
         }
         CompletableFuture<MessageId> messageIdFuture = mb.sendAsync();
         //pendingFutures.add(messageIdFuture);
-        log.info("message {} is invoke...", value);
+        log.info("message {} is invoke in txn {}", value, transactionState.transactionalId);
         //producer.flush();
         messageIdFuture.whenComplete(sendCallback);
 
@@ -430,14 +459,21 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
             case EXACTLY_ONCE:
                 log.info("transaction is begining in EXACTLY_ONCE mode");
                 Transaction transaction = createTransaction();
+                //Producer<IN> producer = createProducer(producerConf, defaultTopic, buildSchema(recordClazz, schemaType));
                 Producer<IN> producer = createProducer(producerConf, defaultTopic, buildSchema(recordClazz, schemaType));
                 long txnIdLeastBits = ((TransactionImpl) transaction).getTxnIdLeastBits();
                 long txnIdMostBits = ((TransactionImpl) transaction).getTxnIdMostBits();
+                TxnID txnID = new TxnID(txnIdMostBits, txnIdLeastBits);
+                if(tid2MessagesMap.get(txnID) == null){
+                    tid2MessagesMap.put(txnID, new ArrayList<>());
+                }
+                //messageIdList.add(messageId);
                 return new PulsarTransactionState<IN>(
                         new TxnID(txnIdMostBits, txnIdLeastBits),
                         transaction,
                         producer,
-                        pendingMessages);
+                 //       pendingMessages);
+                        tid2MessagesMap.get(txnID));
             case AT_LEAST_ONCE:
             case NONE:
                 // Do not create new producer on each beginTransaction() if it is not necessary
@@ -468,7 +504,7 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
             default:
                 throw new UnsupportedOperationException("Not implemented semantic");
         }
-        log.info("preCommit with pending message size {}", pendingMessages.size());
+        log.info("preCommit with pending message size {}", tid2MessagesMap.get(currentTransaction().transactionalId).size());
         checkErroneous();
     }
 
@@ -479,8 +515,9 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
             CompletableFuture<Void> future = transactionState.transaction.commit();
             try {
                 future.get(maxBlockTimeMs, TimeUnit.MILLISECONDS);
-                log.info("transaction {} is commited", transactionState.transactionalId.toString());
-                pendingMessages.clear();
+                log.info("transaction {} is commited with messageID size {}", transactionState.transactionalId.toString(), tid2MessagesMap.get(transactionState.transactionalId).size());
+                //tid2MessagesMap.remove(transactionState.transactionalId);
+                //pendingMessages.clear();
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -518,8 +555,9 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
      * with transactions created during previous checkpoints.
      */
     private Transaction createTransaction() throws Exception {
-
-        Transaction transaction = ((PulsarClientImpl) getOrCreatePulsarClient(clientConfigurationData))
+        PulsarClientImpl client = (PulsarClientImpl) getOrCreatePulsarClient(clientConfigurationData);
+        Thread.sleep(100);
+        Transaction transaction = client
                 .newTransaction()
                 .withTransactionTimeout(tranactionTimeout, TimeUnit.HOURS)
                 .build()
@@ -605,7 +643,7 @@ public class FlinkPulsarTransactionalSink<IN> extends TwoPhaseCommitSinkFunction
                     "%s [transactionalId=%s] [pendingMessages=%s]",
                     this.getClass().getSimpleName(),
                     transactionalId.toString(),
-                    pendingMessages.toString());
+                    pendingMessages.size());
         }
 
         @Override

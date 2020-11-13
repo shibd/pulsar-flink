@@ -30,15 +30,20 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
+import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
+import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.api.transaction.Transaction;
+import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.TenantInfo;
+import org.junit.Assert;
 import org.junit.Test;
 import org.testcontainers.shaded.org.bouncycastle.util.Integers;
 
@@ -74,7 +79,7 @@ public class PulsarTransactionalSinkTestBase {
     public void testExactlyOnceRegularSink() throws Exception {
         admin = PulsarAdmin.builder().serviceHttpUrl(adminUrlStand).build();
         //admin.clusters().createCluster(CLUSTER_NAME, new ClusterData(adminUrl));
-        List<String> tenants = admin.tenants().getTenants();
+        //List<String> tenants = admin.tenants().getTenants();
         //admin.tenants().createTenant(TENANT,
         //        new TenantInfo(Sets.newHashSet("app1"), Sets.newHashSet(CLUSTER_NAME)));
         //admin.namespaces().createNamespace(NAMESPACE1);
@@ -90,7 +95,7 @@ public class PulsarTransactionalSinkTestBase {
     }
 
     protected void testExactlyOnce(boolean regularSink, int sinksCount) throws Exception {
-        final String topic = "oneToOneTopicSink3";
+        final String topic = "oneToOneTopicSink-new-multip";
         final int partition = 0;
         final int numElements = 1000;
         final int failAfterElements = 333;
@@ -127,10 +132,11 @@ public class PulsarTransactionalSinkTestBase {
                     null,
                     Integer.class,
                     RecordSchemaType.AVRO,
+                    Schema.INT32,
                     FlinkPulsarTransactionalSink.Semantic.EXACTLY_ONCE,
                     1
             );
-            inputStream.addSink(sink);
+            inputStream.addSink(sink).setParallelism(3);
         }
 
         FailingIdentityMapper.failedBefore = false;
@@ -149,10 +155,35 @@ public class PulsarTransactionalSinkTestBase {
 
     @Test
     public void testTransaction() throws Exception{
-        //PulsarClient client = PulsarClient.builder().serviceUrl(serviceUrlStand).build();
+        PulsarClient client = PulsarClient.builder().enableTransaction(true).serviceUrl(serviceUrlStand).build();
+        Thread.sleep(1000);
         //PulsarAdmin.builder().serviceHttpUrl(serviceUrlStand).build();
-        //Transaction transaction = ((PulsarClientImpl) client).newTransaction().withTransactionTimeout(1, TimeUnit.HOURS).build().get();
+        Transaction transaction = ((PulsarClientImpl) client).newTransaction().withTransactionTimeout(1, TimeUnit.HOURS).build().get();
+        ProducerImpl<Integer> sinkProducer = (ProducerImpl<Integer>) client.newProducer(Schema.INT32)
+                .topic("test-sink-topic8")
+                .sendTimeout(0, TimeUnit.SECONDS)
+                .create();
 
+        for (int i = 0; i < 5; i++) {
+            sinkProducer.newMessage(transaction).value(i).sendAsync().get();
+        }
+        Consumer<Integer> sinkConsumer = client.newConsumer(Schema.INT32)
+                .topic("test-sink-topic8")
+                .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest)
+                .subscriptionType(SubscriptionType.Shared)
+                .subscriptionName("test")
+                .subscribe();
+        Message<Integer> sinkMessage = sinkConsumer.receive(5, TimeUnit.SECONDS);
+        Assert.assertNull(sinkMessage);
+
+        transaction.commit().get();
+
+        sinkMessage = sinkConsumer.receive(5, TimeUnit.SECONDS);
+        Assert.assertNotNull(sinkMessage);
+        System.out.println(sinkMessage.getValue());
+        sinkMessage = sinkConsumer.receive(5, TimeUnit.SECONDS);
+        Assert.assertNotNull(sinkMessage);
+        System.out.println(sinkMessage.getValue());
     }
 
     private List<Integer> getIntegersSequence(int size) {
@@ -177,25 +208,20 @@ public class PulsarTransactionalSinkTestBase {
         List<Integer> actualElements = new ArrayList<>();
 
         // until we timeout...
-        while (System.currentTimeMillis() < startMillis + timeoutMillis) {
             PulsarClient client = PulsarClient.builder().enableTransaction(true).serviceUrl(serviceUrlStand).build();
             Consumer<Integer> test = client
                     .newConsumer(Schema.INT32)
                     .topic(topic)
-                    .subscriptionName("test")
-                    .enableBatchIndexAcknowledgment(true)
+                    .subscriptionName("test-new1")
+                    .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest)
+                    //.subscriptionType(SubscriptionType.Shared)
+                    //.enableBatchIndexAcknowledgment(true)
                     .subscribe();
+        while (System.currentTimeMillis() < startMillis + timeoutMillis) {
             // query pulsar for new records ...
             Message<Integer> message = test.receive();
             log.info("consume the message {} with the value {}", message.getMessageId(), message.getValue());
             actualElements.add(message.getValue());
-
-            //Collection<ConsumerRecord<Integer, Integer>> records = kafkaServer.getAllRecordsFromTopic(consumerProperties, topic, partition, 1000);
-
-           /* for (ConsumerRecord<Integer, Integer> record : records) {
-                actualElements.add(record.value());
-            }*/
-
             // succeed if we got all expectedElements
             if (actualElements.equals(expectedElements)) {
                 return;
@@ -209,6 +235,12 @@ public class PulsarTransactionalSinkTestBase {
         fail(String.format("Expected %s, but was: %s", formatElements(expectedElements), formatElements(actualElements)));
     }
 
+    @Test
+    public void testSchema(){
+        Schema<Integer> avro = Schema.AVRO(Integer.class);
+        System.out.println(avro);
+
+    }
     private String formatElements(List<Integer> elements) {
         if (elements.size() > 50) {
             return String.format("number of elements: <%s>", elements.size());

@@ -4,6 +4,7 @@ import org.apache.flink.streaming.connectors.pulsar.config.RecordSchemaType;
 
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.PulsarClient;
+import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
 import org.junit.Assert;
 import org.junit.Test;
@@ -33,6 +34,7 @@ public class FlinkPulsarTransactionalSinkTest extends PulsarTestBaseWithFlink{
                 TopicKeyExtractor.NULL,
                 String.class,
                 RecordSchemaType.AVRO,
+                Schema.STRING,
                 FlinkPulsarTransactionalSink.Semantic.EXACTLY_ONCE,
                 1
         );
