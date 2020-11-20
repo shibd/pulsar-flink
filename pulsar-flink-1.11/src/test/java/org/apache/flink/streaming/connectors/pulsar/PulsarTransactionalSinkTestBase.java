@@ -1,13 +1,23 @@
+/**
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.apache.flink.streaming.connectors.pulsar;
 
-import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
-import org.apache.flink.api.common.serialization.TypeInformationSerializationSchema;
-import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.runtime.client.JobExecutionException;
 import org.apache.flink.runtime.state.CheckpointListener;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
@@ -17,8 +27,6 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
-import org.apache.flink.streaming.api.operators.StreamSink;
-import org.apache.flink.streaming.connectors.pulsar.PulsarTestBaseWithFlink;
 import org.apache.flink.streaming.connectors.pulsar.config.RecordSchemaType;
 import org.apache.flink.streaming.connectors.pulsar.testutils.FailingIdentityMapper;
 import org.apache.flink.streaming.connectors.pulsar.testutils.IntegerSource;
@@ -30,79 +38,52 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
-import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
-import org.apache.pulsar.client.api.SubscriptionType;
-import org.apache.pulsar.client.api.transaction.Transaction;
-import org.apache.pulsar.client.impl.ProducerImpl;
-import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
-import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.TenantInfo;
-import org.junit.Assert;
 import org.junit.Test;
-import org.testcontainers.shaded.org.bouncycastle.util.Integers;
 
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
 
 @Slf4j
-public class PulsarTransactionalSinkTestBase {
+public class PulsarTransactionalSinkTestBase extends PulsarTestBaseWithFlink {
     private PulsarAdmin admin;
     private final static String CLUSTER_NAME = "standalone";
     private final static String TENANT = "tnx";
     private final static String NAMESPACE1 = TENANT + "/ns1";
-    private final static String TOPIC_OUTPUT = NAMESPACE1 + "/output";
-    private final static String TOPIC_MESSAGE_ACK_TEST = NAMESPACE1 + "/message-ack-test";
-    private final static String adminUrlStand = "http://localhost:8080";
-    private final static String serviceUrlStand = "pulsar://localhost:6650";
+
     /**
      * Tests the exactly-once semantic for the simple writes into Kafka.
      */
     @Test
     public void testExactlyOnceRegularSink() throws Exception {
-        admin = PulsarAdmin.builder().serviceHttpUrl(adminUrlStand).build();
-        //admin.clusters().createCluster(CLUSTER_NAME, new ClusterData(adminUrl));
-        //List<String> tenants = admin.tenants().getTenants();
-        //admin.tenants().createTenant(TENANT,
-        //        new TenantInfo(Sets.newHashSet("app1"), Sets.newHashSet(CLUSTER_NAME)));
-        //admin.namespaces().createNamespace(NAMESPACE1);
-        //admin.topics().createPartitionedTopic(TOPIC_OUTPUT, TOPIC_PARTITION);
-        //admin.topics().createPartitionedTopic(TOPIC_MESSAGE_ACK_TEST, TOPIC_PARTITION);
-
-        /*admin.tenants().createTenant(NamespaceName.SYSTEM_NAMESPACE.getTenant(),
+        admin = PulsarAdmin.builder().serviceHttpUrl(adminUrl).build();
+        admin.tenants().createTenant(NamespaceName.SYSTEM_NAMESPACE.getTenant(),
                 new TenantInfo(Sets.newHashSet("app1"), Sets.newHashSet(CLUSTER_NAME)));
         admin.namespaces().createNamespace(NamespaceName.SYSTEM_NAMESPACE.toString());
-        admin.topics().createPartitionedTopic(TopicName.TRANSACTION_COORDINATOR_ASSIGN.toString(), 16);*/
+        admin.topics().createPartitionedTopic(TopicName.TRANSACTION_COORDINATOR_ASSIGN.toString(), 16);
 
-        testExactlyOnce(true, 1);
+        testExactlyOnce(1);
     }
 
-    protected void testExactlyOnce(boolean regularSink, int sinksCount) throws Exception {
-        final String topic = "oneToOneTopicSink-new-multip";
-        final int partition = 0;
+    protected void testExactlyOnce(int sinksCount) throws Exception {
+        final String topic = "ExactlyOnceTopicSink1";
         final int numElements = 1000;
         final int failAfterElements = 333;
 
-        TypeInformationSerializationSchema<Integer> schema = new TypeInformationSerializationSchema<>(BasicTypeInfo.INT_TYPE_INFO, new ExecutionConfig());
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.enableCheckpointing(1000);
+        env.enableCheckpointing(500);
         env.setParallelism(1);
         env.setRestartStrategy(RestartStrategies.fixedDelayRestart(1, 0));
 
@@ -114,76 +95,32 @@ public class PulsarTransactionalSinkTestBase {
                 .map(new FailingIdentityMapper<Integer>(failAfterElements));
 
         for (int i = 0; i < sinksCount; i++) {
-           /* FlinkKafkaPartitioner<Integer> partitioner = new FlinkKafkaPartitioner<Integer>() {
-                @Overridex
-                public int partition(Integer record, byte[] key, byte[] value, String targetTopic, int[] partitions) {
-                    return partition;
-                }
-            };*/
-
             ClientConfigurationData clientConfigurationData = new ClientConfigurationData();
-            clientConfigurationData.setServiceUrl(serviceUrlStand);
+            clientConfigurationData.setServiceUrl(serviceUrl);
             SinkFunction<Integer> sink = new FlinkPulsarTransactionalSink<Integer>(
-                    adminUrlStand,
+                    adminUrl,
                     new HashMap<>(),
                     new Properties(),
                     clientConfigurationData,
                     Optional.of(topic),
                     null,
                     Integer.class,
-                    RecordSchemaType.AVRO,
-                    Schema.INT32,
-                    FlinkPulsarTransactionalSink.Semantic.EXACTLY_ONCE,
-                    1
+                    RecordSchemaType.JSON,
+                    FlinkPulsarTransactionalSink.Semantic.EXACTLY_ONCE
             );
-            inputStream.addSink(sink).setParallelism(3);
+            inputStream.addSink(sink);
         }
 
         FailingIdentityMapper.failedBefore = false;
         TestUtils.tryExecute(env, "Exactly once test");
         for (int i = 0; i < sinksCount; i++) {
             // assert that before failure we successfully snapshot/flushed all expected elements
-            /*assertExactlyOnceForTopic(
+            assertExactlyOnceForTopic(
                     topic,
-                    partition,
                     expectedElements,
-                    60000L);*/
-            //deleteTestTopic(topic + i);
+                    60000L);
         }
 
-    }
-
-    @Test
-    public void testTransaction() throws Exception{
-        PulsarClient client = PulsarClient.builder().enableTransaction(true).serviceUrl(serviceUrlStand).build();
-        Thread.sleep(1000);
-        //PulsarAdmin.builder().serviceHttpUrl(serviceUrlStand).build();
-        Transaction transaction = ((PulsarClientImpl) client).newTransaction().withTransactionTimeout(1, TimeUnit.HOURS).build().get();
-        ProducerImpl<Integer> sinkProducer = (ProducerImpl<Integer>) client.newProducer(Schema.INT32)
-                .topic("test-sink-topic8")
-                .sendTimeout(0, TimeUnit.SECONDS)
-                .create();
-
-        for (int i = 0; i < 5; i++) {
-            sinkProducer.newMessage(transaction).value(i).sendAsync().get();
-        }
-        Consumer<Integer> sinkConsumer = client.newConsumer(Schema.INT32)
-                .topic("test-sink-topic8")
-                .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest)
-                .subscriptionType(SubscriptionType.Shared)
-                .subscriptionName("test")
-                .subscribe();
-        Message<Integer> sinkMessage = sinkConsumer.receive(5, TimeUnit.SECONDS);
-        Assert.assertNull(sinkMessage);
-
-        transaction.commit().get();
-
-        sinkMessage = sinkConsumer.receive(5, TimeUnit.SECONDS);
-        Assert.assertNotNull(sinkMessage);
-        System.out.println(sinkMessage.getValue());
-        sinkMessage = sinkConsumer.receive(5, TimeUnit.SECONDS);
-        Assert.assertNotNull(sinkMessage);
-        System.out.println(sinkMessage.getValue());
     }
 
     private List<Integer> getIntegersSequence(int size) {
@@ -200,7 +137,6 @@ public class PulsarTransactionalSinkTestBase {
      */
     public void assertExactlyOnceForTopic(
             String topic,
-            int partition,
             List<Integer> expectedElements,
             long timeoutMillis) throws Exception{
 
@@ -208,14 +144,12 @@ public class PulsarTransactionalSinkTestBase {
         List<Integer> actualElements = new ArrayList<>();
 
         // until we timeout...
-            PulsarClient client = PulsarClient.builder().enableTransaction(true).serviceUrl(serviceUrlStand).build();
+            PulsarClient client = PulsarClient.builder().enableTransaction(true).serviceUrl(serviceUrl).build();
             Consumer<Integer> test = client
-                    .newConsumer(Schema.INT32)
+                    .newConsumer(Schema.JSON(Integer.class))
                     .topic(topic)
-                    .subscriptionName("test-new1")
+                    .subscriptionName("test-new")
                     .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest)
-                    //.subscriptionType(SubscriptionType.Shared)
-                    //.enableBatchIndexAcknowledgment(true)
                     .subscribe();
         while (System.currentTimeMillis() < startMillis + timeoutMillis) {
             // query pulsar for new records ...
@@ -235,12 +169,6 @@ public class PulsarTransactionalSinkTestBase {
         fail(String.format("Expected %s, but was: %s", formatElements(expectedElements), formatElements(actualElements)));
     }
 
-    @Test
-    public void testSchema(){
-        Schema<Integer> avro = Schema.AVRO(Integer.class);
-        System.out.println(avro);
-
-    }
     private String formatElements(List<Integer> elements) {
         if (elements.size() > 50) {
             return String.format("number of elements: <%s>", elements.size());

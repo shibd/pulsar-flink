@@ -80,7 +80,6 @@ public class CachedPulsarClient {
             ClientConfigurationData clientConfig) throws PulsarClientException {
         PulsarClientImpl client;
         try {
-            clientConfig.setEnableTransaction(true);
             client = new PulsarClientImpl(clientConfig);
             log.debug("Created a new instance of PulsarClientImpl for clientConf = {}",
                     clientConfig.toString());

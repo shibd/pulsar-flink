@@ -14,9 +14,13 @@
 
 package org.apache.flink.streaming.connectors.pulsar.internal;
 
+import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.ConfigOptions;
+
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.shade.com.google.common.collect.ImmutableSet;
 
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -85,4 +89,15 @@ public class PulsarOptions {
     public static final String DEFAULT_PARTITIONS = "table-default-partitions";
     public static final String AUTH_PARAMS_KEY = "auth-params";
     public static final String AUTH_PLUGIN_CLASSNAME_KEY = "auth-plugin-classname";
+
+    //transactional sink option
+    public static final String TRANSACTION_PREFIX = "transaction";
+    public static final ConfigOption<Long> TRANSACTION_TIMEOUT_MS = ConfigOptions
+            .key(TRANSACTION_PREFIX + ".timeoutMs")
+            .defaultValue(3600000L)
+            .withDescription("Pulsar's transaction keep-alive time that our sink use");
+    public static final ConfigOption<Long> TRANSACTION_MAX_BLOCK_TIME_MS = ConfigOptions
+            .key(TRANSACTION_PREFIX + "maxBlockTimeMs")
+            .defaultValue(100000L)
+            .withDescription("Maximum time to wait for client asynchronous transaction relate operations");
 }
